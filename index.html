@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name=viewport content="width=device-width, initial-scale=1.0" />
+    <title>Process CPU Usage</title>
+    <link rel="icon" href="data:,"><!-- hint there's no favicon -->
+    <style>
+        #renderContainer {
+            width: 100%;
+            display: flex;
+            box-sizing: border-box;
+            flex-wrap: wrap;
+        }
+
+        .threadDiv {
+            width: 576px;
+            height: 300px;
+            box-sizing: border-box;
+            padding: 1em;
+        }
+
+        .threadDiv>canvas {
+            width: 100%;
+            height: 80%;
+            border: 1px solid black;
+        }
+        .threadDiv>h4.gone {
+            text-decoration: line-through;
+            color: gray;
+        }
+    </style>
+    <script type="text/javascript">
+        const pidStatsFetcher = {
+            pid: NaN,
+            usageByTimeByThread: {},
+            prevStats: null,
+            reset: function() {
+                this.usageByTimeByThread = {};
+                this.prevStats = null;
+            },
+            onPidStatsRsp: function (evt) {
+                const stats = JSON.parse(evt.target.responseText);
+                if (this.prevStats == null) {
+                    this.prevStats = stats;
+                    return;
+                }
+                const elapsedTicks = stats.ticksClockNow - this.prevStats.ticksClockNow;
+                if (elapsedTicks <= 0) {
+                    this.prevStats = stats;
+                    return;
+                }
+                const now = new Date();
+                const expireBefore = (new Date()).setTime(now.getTime() - 5 * 60 * 1000);
+                for (const threadUsagePrev of this.prevStats.threadStats) {
+                    if (threadUsagePrev.tid == NaN) continue;
+                    const threadUsageNow = stats.threadStats.find(e => { return e.tid == threadUsagePrev.tid });
+                    if (threadUsageNow == undefined) continue;
+                    const usage = {
+                        name: threadUsageNow.name,
+                        timestamp: now,
+                        utimeUsage: (threadUsageNow.utime - threadUsagePrev.utime) / elapsedTicks,
+                        stimeUsage: (threadUsageNow.stime - threadUsagePrev.stime) / elapsedTicks,
+                    };
+                    if (usage.utimeUsage < 0 && usage.stimeUsage < 0) {
+                        continue;
+                    }
+                    const usageByTime = this.usageByTimeByThread[threadUsageNow.tid];
+                    if (Array.isArray(usageByTime)) {
+                        usageByTime.push(usage);
+                        while (usageByTime[0].timestamp < expireBefore) {
+                            usageByTime.shift();
+                        }
+                    } else {
+                        this.usageByTimeByThread[threadUsageNow.tid] = [usage];
+                    }
+                }
+                this.prevStats = stats;
+            },
+            render: function () {
+                const container = document.getElementById("renderContainer");
+                for (let tid in this.usageByTimeByThread) {
+                    if (isNaN(parseInt(tid))) {
+                        continue;
+                    }
+                    const usages = this.usageByTimeByThread[tid];
+                    if (usages.length == 0) {
+                        continue;
+                    }
+
+                    let threadDiv = null;
+                    for (let div of container.childNodes) {
+                        if (div.id == `threadDiv${tid}`) {
+                            threadDiv = div;
+                            break;
+                        }
+                    }
+                    if (threadDiv == null) {
+                        threadDiv = document.createElement("div");
+                        threadDiv.className = "threadDiv";
+                        threadDiv.id = `threadDiv${tid}`;
+                        threadDiv.dataset.tid = String(tid);
+                        threadDiv.dataset.msSinceEpoch = "0";
+                        threadDiv.append(document.createElement("h4"));
+                        threadDiv.append(document.createElement("canvas"));
+                        container.append(threadDiv);
+                        console.log(`new thread div #${threadDiv.id} added`)
+                    }
+                    const threadLabel = threadDiv.childNodes[0];
+                    const threadCanvas = threadDiv.childNodes[1];
+
+                    const latestUsage = usages[usages.length - 1];
+                    const tname = latestUsage.name;
+                    const msSinceEpoch = String(latestUsage.timestamp.getTime());
+                    if (threadDiv.dataset.msSinceEpoch == msSinceEpoch) {
+                        // previously existing thread now gone, keep label and canvas content but mark as gone
+                        threadLabel.className = "gone";
+                        continue;
+                    }
+                    threadDiv.dataset.msSinceEpoch = msSinceEpoch;
+                    if (threadLabel.className.length > 0) {
+                        // tid might be recycled, so "gone" h4 might come back
+                        threadLabel.className = "";
+                    }
+                    threadLabel.innerHTML = `${tid}${tname} ${latestUsage.timestamp.toLocaleString('sv')}`;
+                    this.renderThreadCanvas(usages, threadCanvas);
+                } // iterate this.usageByTimeByThread ends
+            },
+            renderThreadCanvas: function (threadUsagesByTime, canvas) {
+                /** @type {CanvasRenderingContext2D} */
+                const ctx = canvas.getContext("2d");
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                let usageSampleCnt = 60;
+                let timeUnitWidth = Math.floor(canvas.width / usageSampleCnt);
+                if (timeUnitWidth < 2) {
+                    timeUnitWidth = 2;
+                    usageSampleCnt = Math.floor(canvas.width / 2);
+                }
+                if (threadUsagesByTime.length < usageSampleCnt) {
+                    usageSampleCnt = threadUsagesByTime.length;
+                }
+                for (let i = 0; i < usageSampleCnt; ++i) {
+                    const usage = threadUsagesByTime[threadUsagesByTime.length - 1 - i];
+                    const heightKernel = canvas.height * usage.stimeUsage;
+                    const heightUser = canvas.height * usage.utimeUsage;
+                    if (heightKernel > 0) {
+                        ctx.fillStyle = "rgb(255, 0, 0)";
+                        ctx.fillRect(i * timeUnitWidth, canvas.height - heightKernel, timeUnitWidth, heightKernel);
+                    }
+                    if (heightUser > 0) {
+                        ctx.fillStyle = "rgb(0, 0, 255)";
+                        ctx.fillRect(i * timeUnitWidth, canvas.height - heightKernel - heightUser, timeUnitWidth, heightUser);
+                    }
+                }
+            },
+            run: async function () {
+                while (!isNaN(this.pid)) {
+                    await new Promise(resolve => {
+                        const xhr = new XMLHttpRequest();
+                        xhr.addEventListener("load", (evt) => {
+                            this.onPidStatsRsp(evt);
+                            resolve();
+                        }, false);
+                        xhr.addEventListener("error", (evt) => {
+                            console.log(`GET /stat/${this.pid} failed`);
+                            this.pid = NaN;
+                            resolve();
+                        }, false);
+                        xhr.addEventListener("abort", (evt) => {
+                            console.log(`GET /stat/${this.pid} aborted`);
+                            this.pid = NaN;
+                            resolve();
+                        });
+                        xhr.open("GET", `/stat/${this.pid}`);
+                        xhr.send();
+                    });
+                    this.render();
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+                console.log("fetching stopped for pid is NaN");
+            },
+            stop: function () {
+                this.pid = NaN;
+            },
+        };
+        async function searchPidsByName(pname) {
+            return await new Promise(resolve => {
+                const xhr = new XMLHttpRequest();
+                xhr.addEventListener("load", (evt) => {
+                    const rsp = JSON.parse(evt.target.responseText);
+                    if (!Array.isArray(rsp.pids)) {
+                        resolve([]);
+                    }
+                    resolve(rsp.pids);
+                }, false);
+                xhr.addEventListener("error", (evt) => {
+                    resolve([]);
+                }, false);
+                xhr.addEventListener("abort", (evt) => {
+                    resolve([]);
+                });
+                xhr.open("GET", `/search?q=${encodeURIComponent(pname)}`);
+                xhr.send();
+            });
+        };
+        async function fetchOrStop() {
+            // stop logic
+            if (!isNaN(pidStatsFetcher.pid)) {
+                pidStatsFetcher.stop();
+                return;
+            }
+
+            // fetch logic
+            const searchValue = document.getElementById("searchbox").value;
+            let pid = parseInt(searchValue);
+            if (isNaN(pid) && searchValue.length > 0) {
+                const pids = await searchPidsByName(searchValue);
+                if (pids.length > 0) {
+                    pid = pids[0];
+                    document.getElementById("searchbox").value = pid.toString();
+                }
+            }
+            if (!isNaN(pid)) {
+                pidStatsFetcher.pid = pid;
+                pidStatsFetcher.reset();
+                pidStatsFetcher.run();
+                return;
+            }
+        };
+    </script>
+</head>
+
+<body>
+    <form action="javascript:fetchOrStop();">
+        <input id="searchbox" type="search" placeholder="pid or commad name" maxlength="16" required />
+        <input type="submit" value="fetch/stop" />
+    </form>
+    <div id="renderContainer">
+    </div>
+</body>
+
+</html>
