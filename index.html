@@ -44,12 +44,12 @@
                 const stats = JSON.parse(evt.target.responseText);
                 if (this.prevStats == null) {
                     this.prevStats = stats;
-                    return;
+                    return true;
                 }
                 const elapsedTicks = stats.ticksClockNow - this.prevStats.ticksClockNow;
                 if (elapsedTicks <= 0) {
                     this.prevStats = stats;
-                    return;
+                    return true;
                 }
                 const now = new Date();
                 const expireBefore = (new Date()).setTime(now.getTime() - 5 * 60 * 1000);
@@ -77,6 +77,7 @@
                     }
                 }
                 this.prevStats = stats;
+                return stats.threadStats.length > 0;
             },
             render: function () {
                 const container = document.getElementById("renderContainer");
@@ -156,11 +157,15 @@
                 }
             },
             run: async function () {
+                const runningIndicator = document.getElementById("runningIndicator");
+                runningIndicator.setAttribute("value", "1");
                 while (!isNaN(this.pid)) {
                     await new Promise(resolve => {
                         const xhr = new XMLHttpRequest();
                         xhr.addEventListener("load", (evt) => {
-                            this.onPidStatsRsp(evt);
+                            if (!this.onPidStatsRsp(evt)) {
+                                this.pid = NaN;
+                            }
                             resolve();
                         }, false);
                         xhr.addEventListener("error", (evt) => {
@@ -168,17 +173,13 @@
                             this.pid = NaN;
                             resolve();
                         }, false);
-                        xhr.addEventListener("abort", (evt) => {
-                            console.log(`GET /stat/${this.pid} aborted`);
-                            this.pid = NaN;
-                            resolve();
-                        });
                         xhr.open("GET", `/stat/${this.pid}`);
                         xhr.send();
                     });
                     this.render();
                     await new Promise(resolve => setTimeout(resolve, 1000));
                 }
+                runningIndicator.setAttribute("value", "0");
                 console.log("fetching stopped for pid is NaN");
             },
             stop: function () {
@@ -234,8 +235,9 @@
 
 <body>
     <form action="javascript:fetchOrStop();">
-        <input id="searchbox" type="search" placeholder="pid or commad name" maxlength="16" required />
+        <input id="searchbox" type="search" placeholder="pid or commad name" maxlength="16" size="16" required />
         <input type="submit" value="fetch/stop" />
+        <meter id="runningIndicator" min="0" max="1" value="0">running</meter>
     </form>
     <div id="renderContainer">
     </div>
